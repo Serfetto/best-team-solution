@@ -1,0 +1,97 @@
+version: "3.9"
+
+services:
+  parser-service:
+    build:
+      context: ./parser-service
+      dockerfile: Dockerfile
+    image: lct-parser-service 
+    ports:
+      - "8001:8001"
+    volumes:
+      - shared-data:/app/parser_service/data
+    restart: unless-stopped
+
+  reviews-service:
+    build:
+      context: ./model-service
+      dockerfile: Dockerfile
+    image: lct-reviews-service
+    environment:
+      REVIEWS_DATA_DIR: /data
+      BANKI_RU_DATASET: /data/banki_ru_full.csv
+      SRAVNI_RU_DATASET: /data/sravni_ru_full.csv
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL_REVIEWS: ${OPENROUTER_MODEL_REVIEWS:-google/gemini-2.5-flash-lite}
+      OPENROUTER_MODEL_MAPPING: ${OPENROUTER_MODEL_MAPPING:-google/gemini-2.5-flash}
+      REVIEWS_WORKERS: ${REVIEWS_WORKERS:-4}
+    depends_on:
+      - parser-service
+    ports:
+      - "8002:8002"
+    volumes:
+      - shared-data:/data
+      - ./model-service/reviews:/app/model-service/reviews:ro
+    restart: unless-stopped
+
+  main-service:
+    build:
+      context: ./main-service
+      dockerfile: Dockerfile
+    image: lct-main-service
+    env_file:
+      - ./main-service/src/configs/.env
+    environment:
+      PARSING_BANKI_FULL: http://parser-service:8001/banki/full
+      PARSING_BANKI_INCREMENTAL: http://parser-service:8001/banki/incremental
+      PARSING_SRAVNI_FULL: http://parser-service:8001/sravni/full
+      PARSING_SRAVNI_INCREMENTAL: http://parser-service:8001/sravni/incremental
+      ANALIZE_BATCH_URL_MODEL: http://reviews-service:8002/analyze/batch
+      ANALIZE_URL_MODEL: http://reviews-service:8002/analyze
+      REPORT_URL_MODEL: http://reviews-service:8002/report
+      INSIGHTS_PRODUCT_SUMMARY_URL_MODEL: http://reviews-service:8002/insights/product-summary
+      INSIGHTS_PRODUCTS_DESCRIPTION_URL_MODEL: http://reviews-service:8002/insights/product-description
+      TAXONOMY_URL_MODEL: http://reviews-service:8002/taxonomy
+      EXPORT_COMBINED_URL_MODEL: http://reviews-service:8002/export/combined
+      EXPORT_DATASET_URL_MODEL: http://reviews-service:8002/export/dataset
+      EXPORT_DERIVED_TAXONOMY_URL_MODEL: http://reviews-service:8002/export/derived-taxonomy
+      Extract_URL_MODEL: http://reviews-service:8002/extract
+      Process_URL_MODEL: http://reviews-service:8002/process
+      INSIGHTS_all_product_description_URL_MODEL: http://reviews-service:8002/insights/all-product-description
+      INSIGHTS_all_product_summary_URL_MODEL: http://reviews-service:8002/insights/all-product-summary
+      TAXONOMY_EDIT_URL_MODEL: http://reviews-service:8002/taxonomy/edit
+      TAXONOMY_SHUFFLE_URL_MODEL: http://reviews-service:8002/taxonomy/shuffle
+      DASHBORD_URL: http://dashboard:8000
+      PROCESSED_DATA_DIR: /app/model-service/data
+      TAXONOMY_FILE_PATH: /app/model-service/reviews/taxonomy.json
+    depends_on:
+      - parser-service
+      - reviews-service
+    ports:
+      - "8003:8003"
+    volumes:
+      - shared-data:/app/model-service/data
+      - ./model-service/reviews:/app/model-service/reviews:ro
+      - ./main-service/database.db:/app/main_service/database.db
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./main-service
+      dockerfile: dashboard/Dockerfile
+    image: lct-dashboard
+    depends_on:
+      - main-service
+      - reviews-service
+    environment:
+      REVIEWS_API_BASE_URL: http://reviews-service:8002
+      MAIN_SERVICE_BASE_URL: http://main-service:8003
+    ports:
+      - "8000:8000"
+    volumes:
+      - shared-data:/app/main_service/model-service/data
+      - ./model-service/reviews:/app/main_service/model-service/reviews:ro
+    restart: unless-stopped
+
+volumes:
+  shared-data:

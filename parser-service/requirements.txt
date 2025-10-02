@@ -1,0 +1,14 @@
+fastapi
+playwright
+pydantic
+requests
+uvicorn
+numpy
+pandas
+scikit-learn
+transformers
+umap-learn
+hdbscan
+razdel
+pymorphy2
+natasha

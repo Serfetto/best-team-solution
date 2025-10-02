@@ -1,0 +1,12 @@
+beautifulsoup4
+fastapi
+openai
+openpyxl
+pandas
+pydantic
+python-dateutil
+python-dotenv
+requests
+streamlit
+tqdm
+uvicorn

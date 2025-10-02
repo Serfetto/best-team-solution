@@ -1,0 +1,5 @@
+python -m streamlit run ui_streamlit/app.py
+python -m uvicorn service.api:app --host 127.0.0.1 --port 8000 --reload
+
+# Batch JSON helper
+python scripts/run_batch_once.py --input samples/batch_reviews.json --output batch_predictions.json

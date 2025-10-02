@@ -1,0 +1,864 @@
+"""Pipeline utilities for enriching financial reviews with LLM annotations."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+from dataclasses import dataclass
+import os
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import pandas as pd
+from bs4 import BeautifulSoup
+from dateutil import parser as dtparser
+from openai import OpenAI
+from reviews.prompts import (
+    render_review_prompt_taxonomy,
+    render_review_prompt_freeform,
+    render_mapping_prompt,
+)
+try:
+    # Progress bar for record-level processing
+    from tqdm import tqdm  # type: ignore
+except Exception:  # pragma: no cover
+    # Fallback if tqdm is not installed; keep runtime functional
+    def tqdm(iterable, **kwargs):  # type: ignore
+        return iterable
+
+LOGGER = logging.getLogger(__name__)
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1"
+REQUEST_TIMEOUT = 60
+MAX_RETRIES = 1
+RETRY_BACKOFF_SEC = 3
+DEFAULT_SOURCE = "unknown"
+DEFAULT_WORKERS = 4
+
+VALID_SENTIMENTS = {"positive", "neutral", "negative"}
+
+PRODUCT_TAXONOMY: Tuple[str, ...] = (
+    "\u0434\u0435\u0431\u0435\u0442\u043e\u0432\u0430\u044f \u043a\u0430\u0440\u0442\u0430",
+    "\u043a\u0440\u0435\u0434\u0438\u0442\u043d\u0430\u044f \u043a\u0430\0440\u0442\u0430",
+    "\u0438\u043f\u043e\0442\u0435\u043a\u0430",
+    "\u0430\u0432\u0442\u043e\u043a\u0440\u0435\u0434\u0438\u0442",
+    "\u0432\u043a\u043b\u0430\u0434/\u0434\u0435\u043f\u043e\0437\u0438\u0442",
+    "\u0438\u043d\u0432\u0435\u0441\u0442\u0438\u0446\u0438\u0438/\u0431\u0440\u043e\u043a\u0435\u0440",
+    "\u0441\u0442\u0440\u0430\u0445\u043e\u0432\u0430\u043d\u0438\u0435",
+    "\u043c\u043e\u0431\u0438\u043b\u044c\u043d\u043e\u0435 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435",
+    "\u0438\u043d\u0442\u0435\u0440\u043d\u0435\u0442-\u0431\u0430\u043d\u043a (\u0432\u0435\u0431)",
+    "\u043f\u0440\u0435\u043c\u0438\u0430\u043b\u044c\u043d\u043e\u0435 \u043e\u0431\u0441\u043b\u0443\u0436\u0438\u0432\u0430\u043d\u0438\u0435",
+    "\u0434\u0440\u0443\u0433\u043e\u0439 \u043f\u0440\u043e\u0434\u0443\u043a\u0442/\u0443\u0441\u043b\u0443\u0433\u0430",
+)
+
+PRODUCT_LOOKUP = {name.lower(): name for name in PRODUCT_TAXONOMY}
+
+# Optionally override taxonomy from a JSON file
+try:
+    _tx_path = os.getenv("REVIEWS_TAXONOMY_PATH", "").strip()
+    if not _tx_path:
+        _tx_path = str(Path(__file__).with_name("taxonomy.json"))
+    _tx_p = Path(_tx_path)
+    if _tx_p.exists():
+        with open(_tx_p, "r", encoding="utf-8") as _fh:
+            _tx_data = json.load(_fh)
+        if isinstance(_tx_data, list):
+            _items = [str(x).strip() for x in _tx_data if str(x).strip()]
+            if _items:
+                PRODUCT_TAXONOMY = tuple(_items)  # type: ignore
+                PRODUCT_LOOKUP = {name.lower(): name for name in PRODUCT_TAXONOMY}  # type: ignore
+except Exception as _exc:
+    LOGGER.warning("Failed to override taxonomy from JSON: %s", _exc)
+
+def _extract_cost(response: Any) -> Optional[float]:
+    """Extract monetary cost from an OpenRouter/OpenAI response if present.
+
+    Handles multiple shapes: plain numbers, numeric strings, nested dicts.
+    """
+    def _as_float(v: Any) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, str):
+            # Extract first numeric like 0.00123 from string "$0.00123 USD"
+            m = re.search(r"[-+]?[0-9]*\.?[0-9]+", v.replace(",", "."))
+            if m:
+                try:
+                    return float(m.group(0))
+                except Exception:
+                    return None
+        if isinstance(v, dict):
+            # Common nested keys
+            for k in ("usd", "amount", "value", "total", "price"):
+                if k in v:
+                    f = _as_float(v[k])
+                    if f is not None:
+                        return f
+        return None
+
+    try:
+        # 1) Attribute-style usage
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            for key in ("cost", "total_cost", "total_cost_usd", "cost_usd"):
+                val = getattr(usage, key, None)
+                f = _as_float(val)
+                if f is not None:
+                    return f
+            if hasattr(usage, "to_dict"):
+                u = usage.to_dict()
+                if isinstance(u, dict):
+                    for key in ("cost", "total_cost", "total_cost_usd", "cost_usd"):
+                        if key in u:
+                            f = _as_float(u.get(key))
+                            if f is not None:
+                                return f
+        # 1b) completion.usage.cost path (OpenRouter may nest usage under completion)
+        completion = getattr(response, "completion", None)
+        if completion is not None:
+            comp_usage = getattr(completion, "usage", None)
+            if comp_usage is not None:
+                val = getattr(comp_usage, "cost", None)
+                f = _as_float(val)
+                if f is not None:
+                    return f
+                if hasattr(comp_usage, "to_dict"):
+                    u2 = comp_usage.to_dict()
+                    if isinstance(u2, dict):
+                        f = _as_float(u2.get("cost"))
+                        if f is not None:
+                            return f
+        # 2) Dict dump of entire response
+        data = None
+        if hasattr(response, "model_dump"):
+            data = response.model_dump()
+        elif hasattr(response, "to_dict"):
+            data = response.to_dict()
+        if isinstance(data, dict):
+            u = data.get("usage")
+            if isinstance(u, dict):
+                for key in ("cost", "total_cost", "total_cost_usd", "cost_usd"):
+                    if key in u:
+                        f = _as_float(u.get(key))
+                        if f is not None:
+                            return f
+            # completion.usage.cost in dict form
+            comp = data.get("completion")
+            if isinstance(comp, dict):
+                cu = comp.get("usage")
+                if isinstance(cu, dict):
+                    f = _as_float(cu.get("cost"))
+                    if f is not None:
+                        return f
+            meta = data.get("meta")
+            if isinstance(meta, dict):
+                for key in ("cost", "total_cost"):
+                    if key in meta:
+                        f = _as_float(meta.get(key))
+                        if f is not None:
+                            return f
+    except Exception:
+        return None
+    return None
+@dataclass
+class DatasetSpec:
+    """Input dataset description."""
+
+    name: str
+    path: str
+    limit: Optional[int] = None
+
+
+@dataclass
+class LLMConfig:
+    """Configuration required to call OpenRouter-compatible models.
+
+    model: used for per-review enrichment.
+    mapping_model: optional model used for product mapping standardization; defaults to `model` if None.
+    """
+
+    api_key: str
+    model: str
+    base_url: str = OPENROUTER_URL
+    mapping_model: Optional[str] = None
+
+
+@dataclass
+class DatasetResult:
+    """Holds processed reviews and accompanying metrics for a dataset."""
+
+    name: str
+    dataframe: pd.DataFrame
+    metrics: Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Helpers without LLM
+# ---------------------------------------------------------------------------
+def html_to_text(html: Any) -> str:
+    if html is None or (isinstance(html, float) and pd.isna(html)):
+        return ""
+    soup = BeautifulSoup(str(html), "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    text = soup.get_text(separator="\\n")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\\n".join(lines)
+
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_datetime(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    try:
+        parsed = dtparser.parse(str(value))
+    except (ValueError, TypeError, OverflowError) as exc:
+        LOGGER.debug("Failed to parse datetime %s: %s", value, exc)
+        return None
+    return parsed.isoformat()
+
+
+def _normalize_rating(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _sentiment_from_rating(rating: Optional[float]) -> str:
+    if rating is None:
+        return "neutral"
+    if rating >= 4:
+        return "positive"
+    if rating <= 2:
+        return "negative"
+    return "neutral"
+
+
+def _ensure_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        tokens = [token.strip() for token in re.split(r"[;,\n]+", value) if token.strip()]
+        return tokens
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _normalize_score(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        cleaned = value.replace(",", ".")
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _default_enrichment(rating: Optional[float]) -> Dict[str, Any]:
+    return {
+        "sentiment": _sentiment_from_rating(rating),
+        "product": PRODUCT_TAXONOMY[-1],
+        "score_service": None,
+        "score_tariffs": None,
+        "score_reliability": None,
+        "product_strengths": [],
+        "product_weaknesses": [],
+    }
+
+
+def _parse_llm_json(content: str) -> Dict[str, Any]:
+    if not content:
+        raise ValueError("Empty response from LLM")
+    content = content.strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        match = re.search(r"{.*}", content, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError as exc:
+                raise ValueError("Failed to parse JSON from LLM response") from exc
+        raise ValueError("Failed to parse JSON from LLM response")
+
+
+def _normalize_enrichment(
+    data: Optional[Dict[str, Any]],
+    rating: Optional[float],
+    *,
+    taxonomy: Optional[Sequence[str]] = PRODUCT_TAXONOMY,
+) -> Dict[str, Any]:
+    result = _default_enrichment(rating)
+    if not isinstance(data, dict):
+        return result
+
+    sentiment = data.get("sentiment")
+    if isinstance(sentiment, str) and sentiment.strip():
+        candidate = sentiment.strip().lower()
+        result["sentiment"] = candidate if candidate in VALID_SENTIMENTS else _sentiment_from_rating(rating)
+
+    product = data.get("product")
+    if taxonomy:
+        product_candidate = product if isinstance(product, str) and product.strip() else result["product"]
+        if isinstance(product_candidate, str):
+            result["product"] = PRODUCT_LOOKUP.get(product_candidate.lower(), PRODUCT_TAXONOMY[-1])
+        else:
+            result["product"] = PRODUCT_TAXONOMY[-1]
+    else:
+        items: List[str] = []
+        if isinstance(product, (list, tuple)):
+            items = [str(x).strip() for x in product if str(x).strip()]
+        elif isinstance(product, str):
+            items = [t.strip() for t in re.split(r"[;,\n]+", product) if t.strip()]
+        items = list(dict.fromkeys(items))
+        result["product"] = ", ".join(items) if items else PRODUCT_TAXONOMY[-1]
+
+    for key in ("score_service", "score_tariffs", "score_reliability"):
+        result[key] = _normalize_score(data.get(key))
+
+    result["product_strengths"] = _ensure_list(data.get("product_strengths"))
+    result["product_weaknesses"] = _ensure_list(data.get("product_weaknesses"))
+
+    # 'summary' field intentionally omitted per requirements
+
+    return result
+
+
+def _build_prompt(payload: Dict[str, Any]) -> str:
+    taxonomy_text = "\n".join(f"- {item}" for item in PRODUCT_TAXONOMY)
+    pieces: List[str] = []
+    title = payload.get("title")
+    if isinstance(title, str) and title.strip():
+        pieces.append(f"Title: {title.strip()}")
+
+    text_clean = payload.get("text_clean") or ""
+    if text_clean:
+        pieces.append(f"Review: {text_clean}")
+
+    text_raw = payload.get("text_raw") or ""
+    if not text_clean and text_raw:
+        pieces.append(f"Review (raw): {text_raw}")
+
+    rating = payload.get("rating")
+    if rating is not None:
+        pieces.append(f"Rating: {rating}")
+
+    agent_answer = payload.get("agent_answer_text") or ""
+    if agent_answer:
+        pieces.append(f"Bank reply: {agent_answer}")
+
+    user_name = payload.get("user_name") or ""
+    if user_name:
+        pieces.append(f"Author: {user_name}")
+
+    context = "\n".join(pieces)
+    prompt = render_review_prompt_taxonomy(taxonomy_text, context)
+    if False:
+        prompt = (
+        "You are a financial services quality analyst. Analyse the customer review.\n"
+        "Only extract banking products/services. Do NOT include cashback categories, perks, marketing programs, or general themes (e.g., 'Путешествия', 'Спорт').\n"
+        "Available product categories (choose one exact value):\n"
+        f"{taxonomy_text}\n\n"
+        "Return strictly valid JSON with the following fields:\n"
+        "{\n"
+        '  "sentiment": "positive|neutral|negative",\n'
+        '  "product": "<one category>",\n'
+        '  "score_service": <integer 0-10 or null>,\n'
+        '  "score_tariffs": <integer 0-10 or null>,\n'
+        '  "score_reliability": <integer 0-10 or null>,\n'
+        '  "product_strengths": ["short strength", ...],\n'
+        '  "product_weaknesses": ["short weakness", ...]\n'
+        "}\n"
+        "Use null or empty lists when data is missing. Do not add explanations outside JSON.\n\n"
+        f"Review data:\n{context}"
+    )
+    # Strengthen normalization rules for standardized mapping (LLM-only unification)
+    prompt = (
+        "You are given a list of banking product/service mentions from customer reviews (Russian).\n"
+        "Normalize each mention to a single standardized banking product/service category (singular, concise).\n"
+        "Normalization rules:\n"
+        "- Map document- or request-like phrases tied to a product (e.g., statements, certificates, references, requisites, limits, blocking/unblocking) to the underlying product category (account, card, loan, mortgage, deposit, brokerage, insurance, mobile app, internet banking), not a separate category.\n"
+        "- Map operational artifacts of an account to the account category; artifacts of cards to the appropriate card category (debit/credit), etc.\n"
+        "- Do NOT include cashback themes, perks, or general topics (e.g., travel, sport).\n"
+        "- Exclude brand names/tariffs from the category; keep it generic.\n"
+        "Return JSON with an object 'mapping' where each original mention maps to its standardized category.\n"
+        "Use only keys from the provided list; do not invent new keys.\n\n"
+        f"Mentions:\n{sample_text}"
+    )
+    return prompt
+
+
+def _build_prompt_freeform(payload: Dict[str, Any]) -> str:
+    pieces: List[str] = []
+    title = payload.get("title")
+    if isinstance(title, str) and title.strip():
+        pieces.append(f"Title: {title.strip()}")
+
+    text_clean = payload.get("text_clean") or ""
+    if text_clean:
+        pieces.append(f"Review: {text_clean}")
+
+    text_raw = payload.get("text_raw") or ""
+    if not text_clean and text_raw:
+        pieces.append(f"Review (raw): {text_raw}")
+
+    rating = payload.get("rating")
+    if rating is not None:
+        pieces.append(f"Rating: {rating}")
+
+    agent_answer = payload.get("agent_answer_text") or ""
+    if agent_answer:
+        pieces.append(f"Bank reply: {agent_answer}")
+
+    user_name = payload.get("user_name") or ""
+    if user_name:
+        pieces.append(f"Author: {user_name}")
+
+    context = "\n".join(pieces)
+    prompt = render_review_prompt_freeform(context)
+    if False:
+        prompt = (
+        "You are a financial services quality analyst. Analyse the customer review.\n"
+        "Extract mentioned banking product(s)/services in free form (not from a fixed list).\n"
+        "Do NOT include cashback categories, perks, marketing programs, or general themes (e.g., 'Путешествия', 'Спорт').\n"
+        "If no banking product/service is present, return an empty list for 'product'.\n"
+        "Return strictly valid JSON with the following fields:\n"
+        "{\n"
+        '  "sentiment": "positive|neutral|negative",\n'
+        '  "product": ["short product name", ...] | "short product names delimited by ;",\n'
+        '  "score_service": <integer 0-10 or null>,\n'
+        '  "score_tariffs": <integer 0-10 or null>,\n'
+        '  "score_reliability": <integer 0-10 or null>,\n'
+        '  "product_strengths": ["short strength", ...],\n'
+        '  "product_weaknesses": ["short weakness", ...]\n'
+        "}\n"
+        "Use null or empty lists when data is missing. Do not add explanations outside JSON.\n\n"
+        f"Review data:\n{context}"
+    )
+    return prompt
+
+
+def _standardize_products_with_llm(client: OpenAI, model: str, mentions: List[str]) -> Tuple[Dict[str, str], Optional[float]]:
+    # Prepare a stable, deduplicated list to reduce token usage
+    unique = list(dict.fromkeys([m.strip() for m in mentions if isinstance(m, str) and m.strip()]))
+    if not unique:
+        return {}, None
+
+    sample_text = "\n".join(f"- {m}" for m in unique)
+    prompt = render_mapping_prompt(sample_text)
+    if False:
+        prompt = (
+        "You are given a list of product mentions from customer reviews (Russian).\n"
+        "Group similar mentions into standardized product categories (singular form).\n"
+        "Return JSON with an object 'mapping' where each original mention maps to its standardized category.\n"
+        "Example: {\n  \"mapping\": {\n    \"дебетовые карты\": \"дебетовая карта\",\n    \"карты дебетовые\": \"дебетовая карта\"\n  }\n}\n"
+        "Use only keys from the provided list; do not invent new keys.\n\n"
+        f"Mentions:\n{sample_text}"
+    )
+
+    last_error: Optional[Exception] = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Ответь строго валидным JSON. Используй русский язык для всех текстовых значений и названий категорий. Поле 'sentiment' должно быть одним из: positive | neutral | negative (англ.)."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                timeout=REQUEST_TIMEOUT,
+                response_format={"type": "json_object"},
+                extra_body={
+                    # "provider": {"sort": "price"},  # optional provider hint
+                    "usage": {"include": True},
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            print('-----------------ee-------')
+            print(response)
+            choice = response.choices[0]
+            content = getattr(choice.message, "content", None)
+            if isinstance(content, list):
+                content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+            if content is None:
+                raise ValueError("LLM response contains no content")
+            data = _parse_llm_json(content)
+            mapping = data.get("mapping") if isinstance(data, dict) else {}
+            if not isinstance(mapping, dict):
+                mapping = {}
+            try:
+                print('------------------------')
+                print(response)
+                usage = getattr(response, "usage", None)
+                raw_cost = getattr(usage, "cost", None) if usage is not None else None
+                cost: Optional[float] = float(raw_cost) if raw_cost is not None else None
+            except Exception:
+                cost = None
+            mapping = {str(k): str(v) for k, v in mapping.items()}
+            return mapping, cost
+        except Exception as exc:
+            last_error = exc
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+                continue
+            raise
+    if last_error:
+        raise last_error
+    return {}, None
+
+
+def _call_llm(
+    client: OpenAI,
+    model: str,
+    payload: Dict[str, Any],
+    taxonomy: Optional[Sequence[str]] = PRODUCT_TAXONOMY,
+) -> Tuple[Dict[str, Any], Optional[float]]:
+    prompt = _build_prompt(payload) if taxonomy else _build_prompt_freeform(payload)
+    last_error: Optional[Exception] = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "Ответь строго валидным JSON. Используй русский язык для всех текстовых значений и названий категорий. Поле 'sentiment' должно быть одним из: positive | neutral | negative (англ.)."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                timeout=REQUEST_TIMEOUT,
+                response_format={"type": "json_object"},
+                extra_body={
+                    # "provider": {"sort": "price"},  # optional provider hint
+                    "usage": {"include": True},
+                    "response_format": {"type": "json_object"},
+                },
+            )
+            choice = response.choices[0]
+            content = getattr(choice.message, "content", None)
+            if isinstance(content, list):
+                content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+            if content is None:
+                raise ValueError("LLM response contains no content")
+            data = _parse_llm_json(content)
+            # Extract monetary cost directly via response.usage.cost
+            try:
+                usage = getattr(response, "usage", None)
+                raw_cost = getattr(usage, "cost", None) if usage is not None else None
+                cost: Optional[float] = float(raw_cost) if raw_cost is not None else None
+            except Exception:
+                cost = None
+            return data, cost
+        except Exception as exc:
+            last_error = exc
+            LOGGER.warning(
+                "LLM request failed for dataset=%s id=%s (attempt %s/%s): %s",
+                payload.get("dataset"),
+                payload.get("id"),
+                attempt + 1,
+                MAX_RETRIES + 1,
+                exc,
+            )
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+                continue
+            raise
+    if last_error:
+        raise last_error
+    raise RuntimeError("LLM request failed without exception")
+
+
+def _prepare_record(row: Dict[str, Any], spec: DatasetSpec) -> Dict[str, Any]:
+    record: Dict[str, Any] = {
+        "dataset": spec.name,
+        "id": row.get("id"),
+        "title": row.get("title"),
+        "text_raw": row.get("text"),
+        "text_clean": html_to_text(row.get("text")),
+        "agent_answer_text": html_to_text(row.get("agentAnswerText")) if "agentAnswerText" in row else "",
+        "posted_at": _normalize_datetime(row.get("date")),
+        "grade_extracted": _normalize_rating(row.get("rating")),
+        "rating": _normalize_rating(row.get("rating")),
+        "source_extracted": row.get("userName") or DEFAULT_SOURCE,
+        "user_name": row.get("userName"),
+    }
+    record["text_clean"] = record["text_clean"] or ""
+    record["agent_answer_text"] = record["agent_answer_text"] or ""
+    return record
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def build_reviews_dataset(
+    specs: Sequence[DatasetSpec],
+    llm_config: LLMConfig,
+    taxonomy: Optional[Sequence[str]] = PRODUCT_TAXONOMY,
+) -> Tuple[pd.DataFrame, Dict[str, DatasetResult]]:
+    if not specs:
+        raise ValueError("At least one dataset specification is required")
+
+    client = OpenAI(api_key=llm_config.api_key, base_url=llm_config.base_url)
+
+    combined_frames: List[pd.DataFrame] = []
+    results: Dict[str, DatasetResult] = {}
+
+    # Collect mentions across datasets when taxonomy is not provided (free-form mode)
+    global_mentions: List[str] = [] if taxonomy is None else []
+
+    for spec in specs:
+        dataset_start = time.time()
+        try:
+            df = pd.read_csv(spec.path)
+        except Exception as exc:
+            LOGGER.error("Failed to load dataset %s: %s", spec.path, exc)
+            raise
+
+        # Optional date filtering from environment
+        df_date_from = os.getenv("REVIEWS_DATE_FROM", "").strip()
+        df_date_to = os.getenv("REVIEWS_DATE_TO", "").strip()
+        if (df_date_from or df_date_to) and "date" in df.columns:
+            try:
+                dates = pd.to_datetime(df["date"], errors="coerce")
+                if df_date_from:
+                    start = pd.to_datetime(df_date_from, errors="coerce")
+                    if pd.notna(start):
+                        df = df[dates >= start]
+                if df_date_to:
+                    end = pd.to_datetime(df_date_to, errors="coerce")
+                    if pd.notna(end):
+                        df = df[dates <= end]
+            except Exception as exc:
+                LOGGER.warning("Failed to apply date filter for %s: %s", spec.path, exc)
+
+        if spec.limit is not None:
+            df = df.head(spec.limit)
+
+        metrics: Dict[str, Any] = {
+            "dataset": spec.name,
+            "source_path": spec.path,
+            "limit": spec.limit,
+            "total_rows": int(len(df)),
+            "processed_rows": 0,
+            "llm_calls": 0,
+            "llm_failures": 0,
+            "llm_elapsed_seconds": 0.0,
+            "llm_cost_total": 0.0,
+        }
+
+        records: List[Dict[str, Any]] = []
+
+        if not df.empty:
+            rows = df.to_dict(orient="records")
+
+            # Prepare indices, records and payloads
+            prepared: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
+            for idx, row in enumerate(rows):
+                record = _prepare_record(row, spec)
+                payload = {
+                    "dataset": spec.name,
+                    "id": record.get("id"),
+                    "title": record.get("title"),
+                    "text_clean": record.get("text_clean"),
+                    "text_raw": record.get("text_raw"),
+                    "rating": record.get("rating"),
+                    "agent_answer_text": record.get("agent_answer_text"),
+                    "user_name": record.get("user_name"),
+                }
+                prepared.append((idx, record, payload))
+
+            def _process_one(item: Tuple[int, Dict[str, Any], Dict[str, Any]]):
+                idx, record, payload = item
+                iter_start = time.perf_counter()
+                llm_data: Optional[Dict[str, Any]] = None
+                llm_cost: Optional[float] = None
+                llm_calls = 0
+                llm_failures = 0
+                llm_elapsed = 0.0
+                if record.get("text_clean"):
+                    try:
+                        llm_start = time.time()
+                        llm_data, llm_cost = _call_llm(client, llm_config.model, payload, taxonomy)
+                        llm_elapsed += time.time() - llm_start
+                        llm_calls += 1
+                    except Exception as exc:
+                        llm_failures += 1
+                        LOGGER.warning(
+                            "Falling back to heuristic enrichment for dataset=%s id=%s: %s",
+                            spec.name,
+                            record.get("id"),
+                            exc,
+                        )
+                enrichment = _normalize_enrichment(llm_data, record.get("rating"), taxonomy=taxonomy)
+                record.update(enrichment)
+                record["cost"] = float(llm_cost) if llm_cost is not None else None
+                iter_elapsed = time.perf_counter() - iter_start
+                record["iter_seconds"] = float(iter_elapsed)
+                return (
+                    idx,
+                    record,
+                    {
+                        "llm_calls": llm_calls,
+                        "llm_failures": llm_failures,
+                        "llm_elapsed_seconds": llm_elapsed,
+                        "llm_cost_total": float(llm_cost) if llm_cost is not None else 0.0,
+                    },
+                )
+
+            try:
+                workers = max(1, int(os.getenv("REVIEWS_WORKERS", str(DEFAULT_WORKERS))))
+            except Exception:
+                workers = DEFAULT_WORKERS
+            # Save worker count into metrics
+            metrics["workers"] = workers
+
+            results_buffer: List[Optional[Dict[str, Any]]] = [None] * len(prepared)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_process_one, it) for it in prepared]
+                pbar = tqdm(total=len(futures), desc=f"{spec.name}", unit="row", leave=False)
+                for fut in as_completed(futures):
+                    idx, rec, inc = fut.result()
+                    results_buffer[idx] = rec
+                    metrics["llm_calls"] += inc.get("llm_calls", 0)
+                    metrics["llm_failures"] += inc.get("llm_failures", 0)
+                    metrics["llm_elapsed_seconds"] += inc.get("llm_elapsed_seconds", 0.0)
+                    metrics["llm_cost_total"] += inc.get("llm_cost_total", 0.0)
+                    pbar.update(1)
+                pbar.close()
+
+            records = [r for r in results_buffer if r is not None]
+
+        dataset_df = pd.DataFrame.from_records(records)
+        metrics["processed_rows"] = int(len(dataset_df))
+        metrics["processing_seconds"] = time.time() - dataset_start
+        if metrics["processed_rows"] > 0 and metrics["processing_seconds"] > 0:
+            metrics["avg_iter_seconds"] = metrics["processing_seconds"] / metrics["processed_rows"]
+
+        if not dataset_df.empty and "text_clean" in dataset_df:
+            avg_length = dataset_df["text_clean"].str.len().mean()
+            if isinstance(avg_length, float) and avg_length == avg_length:
+                metrics["avg_text_length"] = float(avg_length)
+
+        # In free-form mode, accumulate product mentions for global standardization later
+        if taxonomy is None and not dataset_df.empty and "product" in dataset_df:
+            for v in dataset_df["product"].dropna().astype(str).tolist():
+                global_mentions.extend(_ensure_list(v))
+
+        result = DatasetResult(name=spec.name, dataframe=dataset_df, metrics=metrics)
+        results[spec.name] = result
+
+        if not dataset_df.empty:
+            combined_frames.append(dataset_df)
+
+    combined_df = pd.concat(combined_frames, ignore_index=True) if combined_frames else pd.DataFrame()
+
+    # If taxonomy is not provided, standardize products globally across all datasets
+    if taxonomy is None and not combined_df.empty and not combined_df.get("product").empty:
+        mapping_model = llm_config.mapping_model or llm_config.model
+        mapping, map_cost = _standardize_products_with_llm(client, mapping_model, global_mentions)
+
+        lowered = {str(k).strip().lower(): str(v).strip() for k, v in (mapping or {}).items() if str(k).strip()}
+
+        def _apply_mapping_plain(val: Any) -> str:
+            items = _ensure_list(val)
+            cats: List[str] = []
+            seen = set()
+            for it in items:
+                key = str(it).strip().lower()
+                cat = lowered.get(key, str(it).strip())
+                if cat and cat not in seen:
+                    cats.append(cat)
+                    seen.add(cat)
+            return ", ".join(cats)
+
+        def _apply_mapping(val: Any) -> str:
+            items = _ensure_list(val)
+            categories: List[str] = []
+            seen = set()
+            for it in items:
+                key = str(it).strip().lower()
+                cat = lowered.get(key, str(it).strip())
+                # Unify document-related categories under 'счёт'
+                try:
+                    lowc = str(cat).lower()
+                    if lowc in {"счет", "счёт"} or re.search(r"(справк|выписк).*(сч[её]т)", lowc):
+                        cat = "счёт"
+                except Exception:
+                    pass
+                if cat and cat not in seen:
+                    categories.append(cat)
+                    seen.add(cat)
+            return ", ".join(categories)
+
+        # Apply mapping to each dataset dataframe in-place
+        for res in results.values():
+            df = res.dataframe
+            if not df.empty and "product" in df:
+                df["product"] = df["product"].map(_apply_mapping_plain)
+
+        # Rebuild combined dataframe after standardization
+        combined_df = pd.concat([res.dataframe for res in results.values() if not res.dataframe.empty], ignore_index=True) if results else combined_df
+
+        # Build category -> [original mentions] mapping for external consumption
+        categories: Dict[str, List[str]] = {}
+        for orig, cat in (mapping or {}).items():
+            if not isinstance(orig, str) or not isinstance(cat, str):
+                continue
+            cat_clean = cat.strip()
+            orig_clean = orig.strip()
+            if not cat_clean or not orig_clean:
+                continue
+            # Unify document-related categories under 'счёт'
+            try:
+                low = cat_clean.lower()
+                if low in {"счет", "счёт"} or re.search(r"(справк|выписк).*(сч[её]т)", low):
+                    cat_clean = "счёт"
+            except Exception:
+                pass
+            categories.setdefault(cat_clean, [])
+            if orig_clean not in categories[cat_clean]:
+                categories[cat_clean].append(orig_clean)
+
+        # Store combined mapping in a special result entry
+        combined_metrics: Dict[str, Any] = {
+            "product_mapping": categories,
+            "product_mapping_size": int(len(categories)),
+        }
+        if map_cost is not None:
+            combined_metrics["product_mapping_cost"] = float(map_cost)
+        results["combined"] = DatasetResult(name="combined", dataframe=pd.DataFrame(), metrics=combined_metrics)
+
+    return combined_df, results

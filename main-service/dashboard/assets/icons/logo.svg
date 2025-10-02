@@ -1,0 +1,17 @@
+    <svg xmlns="http://www.w3.org/2000/svg"
+        width="25" height="25"
+        viewBox="0 0 409 409"
+        preserveAspectRatio="xMidYMid meet"
+        aria-hidden="true">
+      <g transform="translate(0,409) scale(0.1,-0.1)"
+        fill="currentColor"
+        stroke="currentColor"
+        stroke-width="300"
+        stroke-linejoin="round"> 
+        <path d="M2113 3305 c11 -26 698 -1988 729 -2077 l30 -88 194 0 c107 0 194 3
+          194 8 0 4 -160 464 -356 1022 -196 558 -366 1044 -378 1080 l-23 65 -198 3
+          c-172 2 -197 1 -192 -13z"/>
+        <path d="M1446 1624 c-61 -19 -140 -95 -155 -150 -20 -72 -14 -155 17 -215
+          122 -242 494 -148 492 125 -1 99 -45 174 -128 219 -64 35 -156 44 -226 21z"/>
+      </g>
+    </svg>

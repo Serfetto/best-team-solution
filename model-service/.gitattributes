@@ -1,0 +1,22 @@
+* text=auto
+
+# Force LF for cross-platform text files
+*.py   text eol=lf
+*.sh   text eol=lf
+*.md   text eol=lf
+*.env  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+
+# Keep native Windows endings for Windows-only scripts
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# Treat common binary types as binary (no EOL changes)
+*.png  -text
+*.jpg  -text
+*.jpeg -text
+*.gif  -text
+*.pdf  -text

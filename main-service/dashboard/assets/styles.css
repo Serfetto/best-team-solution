@@ -1,0 +1,695 @@
+:root {
+  --tile-bg: rgba(255, 255, 255, 0.86);
+  --tile-border: rgba(255, 255, 255, 0.6);
+  --shadow: 0 14px 30px rgba(15, 23, 42, 0.08);
+  --radius: 22px;
+  --bg-blur: 0.1px;
+  --bg-opacity: 0.9;
+  --sidebar-w: 280px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+  color: #1f2937;
+  background: #f7f9ff;  
+}
+
+.page {
+  position: relative;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.dash-dropdown .Select-control{
+  background-color:#fff !important;
+  border:1px solid var(--tile-border);
+  border-radius:12px;
+  box-shadow:var(--shadow);
+}
+
+.dash-dropdown .Select-placeholder,
+.dash-dropdown .Select-value-label{
+  color:#111827;
+}
+
+.dash-dropdown .Select-arrow-zone .Select-arrow{
+  border-top-color:#111827;
+}
+
+.dash-dropdown .Select-menu-outer{
+  position: absolute;
+  z-index: 10000 !important;
+  background: #fff;
+  border: 1px solid var(--tile-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.dash-dropdown .Select-menu{
+  background:#fff !important;
+}
+
+.dash-dropdown .Select-option{
+  background:#fff;
+  color:#111827;
+}
+
+.dash-dropdown .Select-option.is-focused{
+  background: rgba(0,0,0,0.06);
+}
+
+.dash-dropdown .Select-option.is-selected{
+  background:#111827;
+  color:#fff;
+}
+
+
+.controls-card{
+  position: relative;
+  z-index: 5;
+}
+
+.timerange-div{
+  flex: 0 0 auto;
+}
+
+.icon-btn img {
+  width: 25px;
+  height: 25px;
+  display: block;
+}
+
+/* Кнопка-иконка */
+.icon-btn{
+  position:fixed; top:16px; left:16px; z-index:1000;
+  width:42px; height:42px; display:inline-grid; place-items:center;
+  border:1px solid var(--tile-border); background:#fff; color:#111827;
+  border-radius:12px; box-shadow:var(--shadow); cursor:pointer;
+  transition:left .22s ease;
+}
+
+.icon-btn:hover{filter:brightness(0.98)}
+.icon-btn:active{transform:translateY(1px)}
+.icon-btn:focus-visible{outline:2px solid #111827; outline-offset:2px}
+.icon-btn svg{ display:block; }
+
+body.sidebar-open .icon-btn{
+  left: calc(var(--sidebar-w) + 16px);
+}
+
+/* tooltip */
+.icon-btn[data-tooltip]::after{
+  content:attr(data-tooltip);
+  position:absolute; left:calc(100% + 10px); top:50%;
+  transform:translateY(-50%); transform-origin:left center;
+  white-space:nowrap; pointer-events:none; opacity:0;
+  background:#111827; color:#fff; font-size:.85rem; line-height:1;
+  padding:8px 10px; border-radius:10px; box-shadow:var(--shadow);
+  transition:opacity .15s ease, transform .15s ease;
+}
+.icon-btn:hover::after, .icon-btn:focus-visible::after{
+  opacity:1; transform:translateY(-50%);
+}
+
+/* Боковая панель */
+.sidebar{
+  position:fixed; inset:0 auto 0 0; width:var(--sidebar-w); height:100vh; z-index:999;
+  background:var(--tile-bg); border-right:1px solid var(--tile-border);
+  box-shadow:0 10px 30px rgba(15,23,42,.14);
+  backdrop-filter:blur(8px);
+  transform:translateX(-102%); transition:transform .22s ease;
+  padding-top:10px;
+}
+.sidebar.open{ transform:translateX(0) }
+
+.sidebar .title{
+  font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 800;
+  font-size: 1.4rem;
+  color: #000;
+  margin: 0;
+  text-align: center;
+  letter-spacing: 0.5px;
+}
+
+/* Ссылки без внешних отступов */
+.sidebar .vnav a{
+  display: block;
+  padding: 12px 16px;
+  margin: 0;
+  font-family: 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+  font-weight: 500;
+  color: #000;
+  text-decoration: none;
+  border-radius: 8px;
+  transition: background 0.2s ease;
+}
+
+.sidebar .vnav{
+  padding-top: 0;
+}
+
+/* При наведении — лёгкая подсветка */
+.sidebar .vnav a:hover,
+.sidebar .vnav a:focus{
+  background: rgba(0,0,0,0.08);
+  color: #000;
+}
+
+/* Вертикальная навигация */
+.vnav{ padding:14px 14px 18px; display:flex; flex-direction:column; gap:12px; }
+
+/* Мобильные */
+@media (max-width:520px){
+  :root{ --sidebar-w: 88vw; }
+  .icon-btn{ top:12px; left:12px; width:40px; height:40px; }
+  .sidebar{ width:88vw; }
+}
+
+.bg {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(1400px 900px at 18% 28%, rgba(255, 145, 215, 0.85), transparent 65%),
+    radial-gradient(1200px 800px at 82% 22%, rgba(255, 218, 120, 0.85), transparent 65%),
+    radial-gradient(1400px 1000px at 78% 76%, rgba(155, 200, 255, 0.85), transparent 65%),
+    radial-gradient(1100px 800px at 22% 82%, rgba(255, 198, 166, 0.85), transparent 65%),
+    linear-gradient(135deg, #f8f6ff, #f4fbff 40%, #fff7f2 80%);
+  opacity: var(--bg-opacity);
+  filter: blur(var(--bg-blur)) saturate(108%);
+}
+
+main.container {
+  display: grid;
+  gap: 24px;
+  position: relative;
+  z-index: 1;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 32px 20px 48px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px;
+  border-radius: var(--radius);
+  background: var(--tile-bg);
+  border: 1px solid var(--tile-border);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(6px);
+}
+
+.tabs .title {
+  font-weight: 700;
+  font-size: 20px;
+  margin-right: auto;
+}
+
+.hint {
+  opacity: 0.65;
+  font-size: 0.95rem;
+}
+
+.kpi-grid {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+@media (max-width: 980px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 540px) {
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.tile,
+.kpi-wrapper {
+  background: var(--tile-bg);
+  border: 1px solid var(--tile-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  backdrop-filter: blur(6px);
+}
+
+.kpi-wrapper {
+  border-radius: 18px;
+  padding: 16px 18px;
+}
+
+.kpi--small {
+  height: 100px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.kpi--small .kpi-label {
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: rgba(31, 41, 55, 0.6);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+.kpi--small .kpi-value {
+  text-align: center;
+  font-weight: 800;
+  font-size: 28px;
+  line-height: 1;
+  color: #111827;
+}
+
+.kpi-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.kpi-label {
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.82rem;
+}
+
+.graph-section{
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.graph-card {
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: none;
+  padding: 20px;
+  position: relative;
+  z-index: 1;
+  overflow: visible;   
+  min-height: 400px;
+}
+
+.graph-card .dash-graph{
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+.graph-card .dash-graph .main-svg {
+  background: transparent !important;
+}
+
+.sentiment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+
+.sentiment-breakdown {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap-reverse;
+  gap: 12px;
+}
+
+.sentiment-item {
+  flex: 1 1 110px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 18px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+.sentiment-caption {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.sentiment-value {
+  font-weight: 700;
+}
+
+.sentiment-positive {
+  color: #047857;
+  flex: 1.25 1 140px;
+}
+
+.sentiment-negative {
+  color: #b91c1c;
+  flex: 1.25 1 140px;
+}
+
+.sentiment-neutral {
+  color: #475569;
+  flex: 0.9 1 120px;
+}
+
+.sentiment-positive .sentiment-value,
+.sentiment-negative .sentiment-value {
+  font-size: 30px;
+}
+
+.sentiment-neutral .sentiment-value {
+  font-size: 24px;
+}
+
+.sentiment-empty {
+  font-size: 0.95rem;
+  opacity: 0.6;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .sentiment-breakdown {
+    flex-direction: column;
+  }
+
+  .sentiment-item {
+    width: 100%;
+  }
+}
+
+/* Стили для контейнера с двумя datepicker'ами */
+.datepickers-row {
+  display: flex;
+  gap: 16px;
+  flex: 1;
+  min-width: 300px;
+}
+
+/* Общие стили для datepicker контейнеров */
+.datepicker-div {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 140px;
+}
+
+/* Стили для DatePickerSingle */
+.dash-datepicker .SingleDatePickerInput {
+  display: block !important;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--tile-border);
+  background: #fff;
+  box-shadow: var(--shadow);
+  width: 100%;
+}
+
+.dash-datepicker .DateInput {
+  width: 100%;
+  background: transparent;
+}
+
+.dash-datepicker .DateInput_input {
+  font-size: 14px;
+  padding: 8px 12px;
+  border-radius: 11px;
+  border: none;
+  background: transparent;
+  color: #111827;
+  width: 100%;
+  font-family: inherit;
+}
+
+.dash-datepicker .DateInput_input:focus {
+  outline: none;
+  background: #f8fafc;
+  border-color: #3b82f6;
+}
+
+.dash-datepicker .DateInput_input__focused {
+  background: #f8fafc;
+  border-color: #3b82f6;
+}
+
+.dash-datepicker .DateInput_input::placeholder {
+  color: rgba(31, 41, 55, 0.5);
+}
+
+/* Стили для календаря */
+.dash-datepicker .CalendarDay__selected,
+.dash-datepicker .CalendarDay__selected:active,
+.dash-datepicker .CalendarDay__selected:hover {
+  background: #3b82f6;
+  border: 1px solid #3b82f6;
+  border-radius: 8px;
+}
+
+.dash-datepicker .CalendarDay__hovered_span,
+.dash-datepicker .CalendarDay__hovered_span:hover {
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+  color: #111827;
+  border-radius: 6px;
+}
+
+.dash-datepicker .CalendarDay__selected_span {
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+  color: #111827;
+  border-radius: 6px;
+}
+
+.dash-datepicker .CalendarDay__default {
+  border-radius: 6px;
+}
+
+.dash-datepicker .DayPicker_weekHeader {
+  border-radius: 8px 8px 0 0;
+}
+
+.dash-datepicker .CalendarMonth_caption {
+  border-radius: 8px;
+}
+
+.dash-datepicker .CalendarDay__blocked_out_of_range {
+  color: #d1d5db;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+}
+
+/* Адаптивность для мобильных устройств */
+@media (max-width: 768px) {
+  .controls-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .timerange-div,
+  .datepickers-row {
+    width: 100%;
+    min-width: auto;
+  }
+  
+  .timerange-div {
+    margin-bottom: 16px;
+  }
+  
+  .datepickers-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+  
+  .datepicker-div {
+    min-width: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .dash-datepicker .SingleDatePickerInput {
+    max-width: 100%;
+  }
+  
+  .dash-datepicker .DateInput_input {
+    font-size: 16px; /* Увеличиваем для мобильных */
+    padding: 10px 12px;
+  }
+}
+
+/* Выравнивание элементов управления */
+.controls-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.timerange-div {
+  flex: 0 0 auto;
+}
+
+.datepickers-row {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 16px;
+}
+
+/* date */
+.dash-dropdown,
+.dash-datepicker .SingleDatePickerInput {
+  background: #fff;
+  border: 1px solid var(--tile-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  transition: all 0.2s ease;
+}
+
+.dash-dropdown:hover,
+.dash-datepicker .SingleDatePickerInput:hover {
+  box-shadow: 0 8px 25px rgba(15, 23, 42, 0.12);
+}
+
+.dash-dropdown:focus-within,
+.dash-datepicker .SingleDatePickerInput:focus-within {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.controls-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+
+
+
+/* Toast notifications */
+#toast-container{
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 10000;
+}
+
+.toast{
+  max-width: 520px;
+  background: #fff;
+  border: 1px solid var(--tile-border);
+  border-left: 5px solid #ef4444; /* default: error */
+  border-radius: 12px;
+  padding: 12px 14px 12px 14px;
+  box-shadow: var(--shadow);
+  color: #111827;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  animation: toast-in 160ms ease-out;
+}
+
+.toast__text{
+  margin-right: auto;
+  line-height: 1.35;
+}
+
+.toast__close{
+  border: none;
+  background: transparent;
+  color: #6b7280;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* Красивая кнопка */
+.refresh-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
+  color: #fff;
+  font-weight: 600;
+  font-size: 15px;
+  border: none;
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  transition: background 0.2s ease, transform 0.1s ease;
+}
+
+.refresh-btn:hover {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+}
+
+.refresh-btn:active {
+  transform: translateY(1px);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Текст внутри кнопки */
+.refresh-btn .btn-text {
+  display: inline-block;
+}
+
+.loading-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-top: 2px solid #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.toast.is-hiding{ opacity: 0; transform: translateY(-6px); transition: opacity .18s ease, transform .18s ease; }
+
+.toast--success{ border-left-color: #16a34a; }
+.toast--error  { border-left-color: #ef4444; }
+.toast--info   { border-left-color: #3b82f6; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

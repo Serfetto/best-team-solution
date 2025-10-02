@@ -1,0 +1,12 @@
+# Environments / secrets
+.env
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Processed data outputs
+data/processed/
+data/
+pipeline-debug.log

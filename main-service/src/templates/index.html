@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="analysis-port" content="8000">
+  <title>Reviews Dashboard</title>
+  <link rel="icon" href="{{ url_for('static', path='img/favicon.svg') }}" type="image/x-icon">
+  <link rel="stylesheet" href="{{ url_for('static', path='css/styles.css') }}" />
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-3.1.0.min.js" charset="utf-8"></script>
+</head>
+<body class="sidebar-open">
+  <button id="sidebar-toggle" 
+    class="icon-btn"
+    data-tooltip="Открыть боковую панель"
+    aria-label="Открыть боковую панель"
+    aria-expanded="false"
+    aria-controls="left-sidebar">
+    <svg xmlns="http://www.w3.org/2000/svg"
+        width="25" height="25"
+        viewBox="0 0 409 409"
+        preserveAspectRatio="xMidYMid meet"
+        aria-hidden="true">
+      <g transform="translate(0,409) scale(0.1,-0.1)"
+        fill="currentColor"
+        stroke="currentColor"
+        stroke-width="300"
+        stroke-linejoin="round"> 
+        <path d="M2113 3305 c11 -26 698 -1988 729 -2077 l30 -88 194 0 c107 0 194 3
+          194 8 0 4 -160 464 -356 1022 -196 558 -366 1044 -378 1080 l-23 65 -198 3
+          c-172 2 -197 1 -192 -13z"/>
+        <path d="M1446 1624 c-61 -19 -140 -95 -155 -150 -20 -72 -14 -155 17 -215
+          122 -242 494 -148 492 125 -1 99 -45 174 -128 219 -64 35 -156 44 -226 21z"/>
+      </g>
+    </svg>
+  </button>
+
+  <aside id="left-sidebar" class="sidebar open" aria-label="Вертикальная навигация">
+    <nav class="vnav">
+      <div class="title">CloseAI</div>
+      <a href="#" class="dashboard-link" onclick="return redirectOverallAnalysis(event);">Общий анализ</a>
+      <a href="#parsing" data-target="parsing">Парсинг</a>
+      <a href="#taxonomy" data-target="taxonomy">Таксономия</a>
+      <a href="#export" data-target="export">Экспорт</a>
+      <a href="#analysis" data-target="analysis">Анализ</a>
+      <a href="#products" data-target="products">Продукты</a>
+    </nav>
+  </aside>
+
+  <div id="status_erorrs" class="status_erorrs" style="display: none"></div>
+  <div class="bg"></div>
+  
+  <main class="container">
+    <section id="parsing" class="section">
+      <div class="tile parsing-grid">
+        
+		<div class="full">
+		  <div id="parsing-description" class="collapsible">
+			<button id="parsing-desc-toggle" class="collapsible__toggle" type="button" aria-expanded="true" aria-controls="parsing-desc-content">
+			  <span class="collapsible__title">Описание работы с парсингом данных</span>
+			  <span class="collapsible__icon" aria-hidden="true">▲</span>
+			</button>
+			<div id="parsing-desc-content" class="collapsible__content">
+			  <p>В этом разделе вы управляете расписанием обновления данных из источников. Выберите источник и периодичность, затем нажмите «Запустить расписание». Статус и время следующего запуска отображаются ниже.</p>
+			</div>
+		  </div>
+		</div>
+        <label for="parsing-source">Источник:</label>
+        <select id="parsing-source" class="select">
+          <option value="full">Full</option>
+          <option value="banki">Banki</option>
+          <option value="sravni">Sravni</option>
+        </select>
+        <div class="spacer"></div>
+        <label for="parsing-frequency">Как часто:</label>
+        <select id="parsing-frequency" class="select">
+          <option value="">— не выбрано —</option>
+          <option value="real">В реальном времени</option>
+          <option value="day">Через день</option>
+          <option value="week">Еженедельно</option>
+          <option value="month">Ежемесячно</option>
+          <option value="year">Ежегодно</option>
+        </select>
+
+
+        <label for="parsing-mode">Режим:</label>
+        <select id="parsing-mode" class="select">
+          <option value="incremental">Актуализировать</option>
+          <option disabled value="full">Первичный</option>
+        </select>
+
+        <div class="full">
+          <div class="row" style="gap:8px;">
+            <button id="btn-parsing-start" class="btn primary">Начать немедленно</button>
+            <button id="btn-parsing-edit" class="btn">Изменить задачу</button>
+          </div>
+        </div>
+
+        <div class="full">
+          <div id="parsing-status" class="status parsing-status-card">
+            <p>Парсинг не запущен.</p>
+            <p><b>Последний запуск:</b> <span id="last-parsing-time">—</span></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="taxonomy" class="section">
+      <div class="tile taxonomy-panel">
+        <div class="taxonomy-column">
+          <div class="row">
+            <h3>Текущая таксономия</h3>
+            <button id="btn-refresh-taxonomy" class="btn">Обновить</button>
+          </div>
+          <div class="row taxonomy-add-row">
+            <input id="taxonomy-input" class="input" type="text" placeholder="Добавить новую категорию" />
+            <button id="btn-add-taxonomy" class="btn primary" type="button">Добавить</button>
+          </div>
+          <ul id="taxonomy-server-list" class="taxonomy-list"></ul>
+          <p id="taxonomy-server-empty" class="hint hidden">Список пуст. Добавьте категорию, чтобы начать.</p>
+          <div class="taxonomy-footer">
+            <button id="btn-save-taxonomy" class="btn primary" type="button">Сохранить</button>
+            <div id="taxonomy-status" class="status"></div>
+          </div>
+        </div>
+        <div class="taxonomy-column">
+          <h3>Новые категории из анализа</h3>
+          <p id="taxonomy-derived-empty" class="hint">Запустите анализ, чтобы увидеть категории, найденные моделью.</p>
+          <ul id="taxonomy-derived-list" class="taxonomy-list"></ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="export" class="section">
+      <div class="grid">
+        <div class="tile">
+          <h3>Выгрузить общий отчёт</h3>
+          <button id="btn-dl-enriched-xlsx" class="btn primary">Скачать</button>
+          <div id="dl-enriched-xlsx-status" class="status"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="analysis" class="section"> 
+      <div id="upload_block" class="tile"> 
+        <div style="display: flex;justify-content: space-between;align-items: flex-end;">
+          <h3>Загрузка JSON файла</h3>
+          <div id="download-json" class="row" style="margin: 8px 0 16px; gap: 8px; display: none;">
+            <button id="btn-dl-upload-json" class="btn">Скачать загруженный JSON</button>
+          </div>
+        </div>
+        <label for="json_file" class="drop-container" id="dropcontainer">
+          <span class="drop-title">Перетащите JSON файл сюда</span>
+          или
+          <input type="file" id="json_file" accept=".json" required>
+        </label>
+        <div id="upload_status" class="status"></div>
+      </div>
+
+      <div id="result_block" class="tile" style="display: none;">
+        <h3>Результаты анализа</h3>
+
+        <div id="cards_container" class="cards-container"></div>
+        <div id="pagination" class="pagination"></div> 
+      </div> 
+    </section>
+
+    <section id="products" class="section">
+      <div class="tile">
+        <div class="row">
+          <h3>Список продуктов</h3>
+          <button id="btn-refresh-products" class="btn">Обновить</button>
+        </div>
+        
+        <div class="date-range-picker">
+          <div class="date-range-controls">
+            <div class="date-control">
+              <label for="products-date-from">Дата с:</label>
+              <input type="date" id="products-date-from" class="input">
+            </div>
+            <div class="date-control">
+              <label for="products-date-to">Дата по:</label>
+              <input type="date" id="products-date-to" class="input">
+            </div>
+            <div class="date-control">
+              <button id="btn-apply-dates" class="btn primary apply-btn">Применить даты</button>
+            </div>
+          </div>
+        </div>
+        
+        <div class="carousel-container">
+          <button id="carousel-prev" class="carousel-btn">‹</button>
+          
+          <div class="carousel">
+            <div class="carousel-inner" id="products-carousel">
+              <div id="product-extra">
+                <div id="product-metrics"></div>
+                <div id="product-sentiment"></div>
+                <div id="product-graph-reviews"></div>
+                <div id="product-graph-mean"></div>
+                <div id="product-cloud"></div> 
+              </div> 
+            </div>
+          </div>
+
+          <button id="carousel-next" class="carousel-btn">›</button>
+        </div>
+
+  
+        <div class="carousel-indicators" id="carousel-indicators">
+        </div>
+  
+        <div id="products-status" class="status"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="container foot">
+    <span>Сделано на основе FastAPI и HTML/CSS/JS — данные взяты из <a href="https://banki.ru" style="color: #000; text-decoration: none;  ">banki.ru</a> и <a href="https://sravni.ru", style="color: #000; text-decoration: none;">sravni.ru</a></span>
+  </footer>
+
+  <script src="{{ url_for('static', path='js/notifications.js') }}"></script>
+  <script src="{{ url_for('static', path='js/helpers.js') }}"></script>
+  <script src="{{ url_for('static', path='js/state.js') }}"></script>
+  <script src="{{ url_for('static', path='js/api.js') }}"></script>
+  <script src="{{ url_for('static', path='js/taxonomy.js') }}"></script>
+  <script src="{{ url_for('static', path='js/products.js') }}"></script>
+  <script src="{{ url_for('static', path='js/ui-handlers.js') }}"></script>
+
+</body>
+</html>
+
