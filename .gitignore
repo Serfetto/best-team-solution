@@ -4,7 +4,7 @@
 .env.development
 .env.test
 .env.production
-
+artifacts
 # Python
 __pycache__/
 *.py[cod]
